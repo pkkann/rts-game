@@ -1,0 +1,141 @@
+import { describe, expect, it } from 'vitest';
+import { applyCommand } from '../src/sim/commands';
+import { stateHash } from '../src/sim/hash';
+import { findPath } from '../src/sim/pathfinding';
+import { canPlace } from '../src/sim/systems/construction';
+import { stepWorld } from '../src/sim/step';
+import { TILE, Terrain, type World } from '../src/sim/types';
+import { addBuilding, addUnit, createWorld, tileOf } from '../src/sim/world';
+import { aiMatch } from './helpers';
+
+function flatWorld(): World {
+  const w = createWorld(1);
+  w.terrain.fill(Terrain.Grass);
+  w.blocked.fill(0);
+  w.ore.fill(0);
+  w.buildingAt.fill(0);
+  w.entities.clear();
+  // Keep player 1 alive so the game does not end immediately.
+  addBuilding(w, 1, 'cy', 60, 0);
+  return w;
+}
+
+describe('pathfinding', () => {
+  it('finds a straight path on open ground', () => {
+    const w = flatWorld();
+    const path = findPath(w, 0, 10);
+    expect(path[path.length - 1]).toBe(10);
+  });
+
+  it('routes around walls and does not cut corners', () => {
+    const w = flatWorld();
+    for (let y = 0; y < 20; y++) w.blocked[y * w.w + 5] = 1;
+    const path = findPath(w, 2 * w.w + 2, 2 * w.w + 8);
+    expect(path[path.length - 1]).toBe(2 * w.w + 8);
+    expect(path.every((i) => !w.blocked[i])).toBe(true);
+  });
+
+  it('goes to the closest reachable tile when the goal is enclosed', () => {
+    const w = flatWorld();
+    const g = 30 * w.w + 30;
+    for (const d of [-w.w - 1, -w.w, -w.w + 1, -1, 1, w.w - 1, w.w, w.w + 1]) w.blocked[g + d] = 1;
+    const path = findPath(w, 0, g);
+    const last = path[path.length - 1];
+    expect(w.blocked[last]).toBe(0);
+    expect(Math.abs((last % w.w) - 30)).toBeLessThanOrEqual(2);
+  });
+});
+
+describe('construction', () => {
+  it('requires adjacency to own buildings and free tiles', () => {
+    const w = flatWorld();
+    w.players[0].credits = 10000;
+    addBuilding(w, 0, 'cy', 10, 10);
+    expect(canPlace(w, 0, 'power', 14, 10)).toBe(true);
+    expect(canPlace(w, 0, 'power', 20, 10)).toBe(false); // too far
+    expect(canPlace(w, 0, 'power', 11, 11)).toBe(false); // overlaps
+    expect(canPlace(w, 1, 'power', 14, 10)).toBe(false); // not their base
+    addUnit(w, 0, 'rifleman', 14 * TILE + 10, 10 * TILE + 10);
+    expect(canPlace(w, 0, 'power', 14, 10)).toBe(false); // unit in the way
+  });
+});
+
+describe('economy', () => {
+  it('harvesters bring in credits', () => {
+    const w = flatWorld();
+    addBuilding(w, 0, 'cy', 5, 5);
+    addBuilding(w, 0, 'power', 9, 5);
+    for (let y = 15; y < 18; y++) for (let x = 5; x < 8; x++) w.ore[y * w.w + x] = 400;
+    w.players[0].queues.building = { items: ['refinery'], progress: 600, spent: 1500, ready: true };
+    applyCommand(w, 0, { t: 'place', item: 'refinery', x: 5, y: 9 });
+    expect([...w.entities.values()].some((e) => e.type === 'harvester')).toBe(true);
+    const before = w.players[0].credits;
+    for (let i = 0; i < 1500; i++) stepWorld(w);
+    expect(w.players[0].credits).toBeGreaterThan(before + 400);
+  });
+});
+
+describe('combat', () => {
+  it('units shoot enemies in range and they die', () => {
+    const w = flatWorld();
+    addBuilding(w, 0, 'cy', 1, 1);
+    const tank = addUnit(w, 0, 'tank', 20 * TILE, 20 * TILE);
+    const rifle = addUnit(w, 1, 'rifleman', 23 * TILE, 20 * TILE);
+    for (let i = 0; i < 400; i++) stepWorld(w);
+    expect(w.entities.has(rifle.id)).toBe(false);
+    expect(w.entities.has(tank.id)).toBe(true);
+  });
+
+  it('move orders reach their destination', () => {
+    const w = flatWorld();
+    addBuilding(w, 0, 'cy', 1, 1);
+    const ids = [0, 1, 2, 3].map((k) => addUnit(w, 0, 'rifleman', (10 + k) * TILE, 40 * TILE).id);
+    applyCommand(w, 0, { t: 'move', ids, x: 40, y: 20 });
+    for (let i = 0; i < 1000; i++) stepWorld(w);
+    for (const id of ids) {
+      const e = w.entities.get(id)!;
+      expect(e.order.t).toBe('idle');
+      const t = tileOf(w, e.x, e.y);
+      expect(Math.abs((t % w.w) - 40)).toBeLessThanOrEqual(3);
+    }
+  });
+});
+
+describe('AI match', () => {
+  it('is deterministic', () => {
+    const a = aiMatch(42);
+    const b = aiMatch(42);
+    for (let i = 0; i < 3000; i++) {
+      a.step();
+      b.step();
+      if (i % 100 === 0) expect(stateHash(a.world)).toBe(stateHash(b.world));
+    }
+    expect(stateHash(a.world)).toBe(stateHash(b.world));
+  });
+
+  it('is deterministic with 10 players', () => {
+    const a = aiMatch(11, 10);
+    const b = aiMatch(11, 10);
+    expect(a.world.w).toBe(160);
+    for (let i = 0; i < 3000; i++) {
+      a.step();
+      b.step();
+    }
+    expect(stateHash(a.world)).toBe(stateHash(b.world));
+    // Every AI got its economy going.
+    for (const p of a.world.players) expect([...a.world.entities.values()].some((e) => e.owner === p.id && e.type === 'refinery')).toBe(true);
+  });
+
+  it('AIs build a base and an army', () => {
+    const { world, step } = aiMatch(7);
+    for (let i = 0; i < 6000; i++) step();
+    for (const p of world.players) {
+      const mine = [...world.entities.values()].filter((e) => e.owner === p.id);
+      const types = new Set(mine.map((e) => e.type));
+      console.log(`p${p.id}: credits=${p.credits} power=${p.powerProduced}/${p.powerUsed}`, [...types].join(','), mine.length);
+    }
+    const all = [...world.entities.values()];
+    expect(all.some((e) => e.type === 'refinery')).toBe(true);
+    expect(all.some((e) => e.type === 'factory')).toBe(true);
+  });
+});

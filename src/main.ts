@@ -1,0 +1,38 @@
+import { Application } from 'pixi.js';
+import { Game } from './game';
+import { Lobby } from './ui/lobby';
+import './ui/ui.css';
+
+async function main() {
+  const viewport = document.getElementById('viewport')!;
+  const app = new Application();
+  await app.init({ resizeTo: viewport, background: 0x000000, antialias: true, autoDensity: true, resolution: window.devicePixelRatio || 1 });
+  viewport.append(app.canvas);
+
+  const overlay = document.createElement('div');
+  overlay.id = 'overlay';
+  overlay.hidden = true;
+  const status = document.createElement('div');
+  status.id = 'status';
+  status.hidden = true;
+  viewport.append(overlay, status);
+
+  const lobby = new Lobby({
+    playLocal: (seed, ais) => game.startLocal(seed, ais),
+    playOnline: (net, info) => game.startOnline(net, info),
+  });
+  const game = new Game(app, viewport, document.getElementById('sidebar')!, overlay, status, {
+    onExit: () => lobby.leave(),
+  });
+  document.body.append(lobby.el);
+
+  // ?seed=123 jumps straight into an offline 1v1 on that map.
+  const seed = Number(new URLSearchParams(location.search).get('seed'));
+  if (seed) {
+    lobby.hide();
+    game.startLocal(seed, 1);
+  } else lobby.open();
+  if (import.meta.env.DEV) (window as unknown as { game: Game }).game = game;
+}
+
+main();

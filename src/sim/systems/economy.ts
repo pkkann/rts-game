@@ -1,0 +1,129 @@
+import { HARVEST_RATE, HARVESTER_CAPACITY, UNLOAD_RATE } from '../data/units';
+import { bfsFind } from '../pathfinding';
+import { TILE, type Entity, type Order, type World } from '../types';
+import { distSqToEntity, tileOf } from '../world';
+import { clearPath, followPath, isMoving, setPath } from './movement';
+
+type HarvestOrder = Extract<Order, { t: 'harvest' }>;
+
+export function startHarvesting(e: Entity, tx = -1, ty = -1): void {
+  e.order = { t: 'harvest', state: 'seek', tx, ty, refinery: 0 };
+  clearPath(e);
+}
+
+export function updateHarvester(world: World, e: Entity): void {
+  const o = e.order as HarvestOrder;
+  switch (o.state) {
+    case 'seek': {
+      const ore = findOre(world, e, o);
+      if (ore < 0) {
+        if (e.cargo > 0) o.state = 'toRefinery';
+        else e.order = { t: 'idle' }; // Nothing left to mine.
+        return;
+      }
+      o.tx = ore % world.w;
+      o.ty = Math.floor(ore / world.w);
+      setPath(world, e, o.tx * TILE + TILE / 2, o.ty * TILE + TILE / 2);
+      o.state = 'toOre';
+      return;
+    }
+    case 'toOre': {
+      const i = o.ty * world.w + o.tx;
+      if (world.ore[i] === 0) {
+        o.state = 'seek';
+        return;
+      }
+      if (followPath(world, e)) {
+        o.state = tileOf(world, e.x, e.y) === i ? 'mining' : 'seek';
+        // If we could not reach it, mark by moving the search origin to where we are.
+        if (o.state === 'seek') {
+          o.tx = -1;
+          o.ty = -1;
+        }
+      }
+      return;
+    }
+    case 'mining': {
+      const i = o.ty * world.w + o.tx;
+      const take = Math.min(HARVEST_RATE, world.ore[i], HARVESTER_CAPACITY - e.cargo);
+      if (take > 0) {
+        world.ore[i] -= take;
+        e.cargo += take;
+        world.oreVersion++;
+      }
+      if (e.cargo >= HARVESTER_CAPACITY) o.state = 'toRefinery';
+      else if (world.ore[i] === 0) o.state = 'seek';
+      return;
+    }
+    case 'toRefinery': {
+      let ref = o.refinery ? world.entities.get(o.refinery) : undefined;
+      if (!ref || ref.owner !== e.owner || ref.type !== 'refinery') {
+        ref = nearestRefinery(world, e);
+        if (!ref) {
+          clearPath(e);
+          return;
+        }
+        o.refinery = ref.id;
+        clearPath(e);
+      }
+      const near = distSqToEntity(e.x, e.y, ref) <= (TILE * 1.6) ** 2;
+      if (near && !isMoving(e)) {
+        o.state = 'unloading';
+        return;
+      }
+      if (!isMoving(e) && world.tick >= e.repathAt) {
+        setPath(world, e, (ref.tx + 1) * TILE + TILE / 2, (ref.ty + ref.h) * TILE + TILE / 2);
+        e.repathAt = world.tick + 20;
+      }
+      followPath(world, e);
+      return;
+    }
+    case 'unloading': {
+      const ref = world.entities.get(o.refinery);
+      if (!ref) {
+        o.state = 'toRefinery';
+        o.refinery = 0;
+        return;
+      }
+      const amount = Math.min(UNLOAD_RATE, e.cargo);
+      e.cargo -= amount;
+      world.players[e.owner].credits += amount;
+      if (e.cargo === 0) o.state = 'seek';
+      return;
+    }
+  }
+}
+
+function nearestRefinery(world: World, e: Entity): Entity | undefined {
+  let best: Entity | undefined;
+  let bestD = Infinity;
+  for (const r of world.entities.values()) {
+    if (r.owner !== e.owner || r.type !== 'refinery') continue;
+    const d = distSqToEntity(e.x, e.y, r);
+    if (d < bestD) {
+      bestD = d;
+      best = r;
+    }
+  }
+  return best;
+}
+
+/** Nearest ore tile, preferring the last field we worked and avoiding tiles claimed by other harvesters. */
+function findOre(world: World, e: Entity, o: HarvestOrder): number {
+  const claimed = new Set<number>();
+  for (const h of world.entities.values()) {
+    if (h === e || h.order.t !== 'harvest') continue;
+    const ho = h.order;
+    if ((ho.state === 'toOre' || ho.state === 'mining') && ho.tx >= 0) claimed.add(ho.ty * world.w + ho.tx);
+  }
+  let origin = tileOf(world, e.x, e.y);
+  if (o.tx >= 0 && o.ty >= 0) {
+    const pref = o.ty * world.w + o.tx;
+    if (!world.blocked[pref]) origin = pref;
+  }
+  const accept = (i: number) => world.ore[i] > 0 && !claimed.has(i);
+  const found = bfsFind(world, origin, accept);
+  if (found >= 0) return found;
+  // Everything nearby is claimed; share a tile rather than idle.
+  return bfsFind(world, origin, (i) => world.ore[i] > 0);
+}

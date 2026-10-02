@@ -1,0 +1,28 @@
+import type { BuildingType } from './sim/types';
+
+/** Size of a tile on screen, in pixels. */
+export const TILE_PX = 32;
+
+/**
+ * Client-only view state. Never part of the simulation: in multiplayer,
+ * each player has their own.
+ */
+export interface ClientState {
+  localPlayer: number;
+  selection: Set<number>;
+  placing: BuildingType | null;
+  /** Mouse position in viewport pixels. */
+  mouse: { x: number; y: number; inside: boolean };
+  /** Drag-select rectangle in viewport pixels. */
+  drag: { x0: number; y0: number; x1: number; y1: number } | null;
+}
+
+export function createClientState(localPlayer: number): ClientState {
+  return {
+    localPlayer,
+    selection: new Set(),
+    placing: null,
+    mouse: { x: 0, y: 0, inside: false },
+    drag: null,
+  };
+}
