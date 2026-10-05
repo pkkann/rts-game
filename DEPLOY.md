@@ -16,11 +16,17 @@ Cloudflare edge ──tunnel──▶ cloudflared ──▶ http://localhost:300
                                               └─ WS  /ws        game rooms
 ```
 
+The deploy checkout's `origin` is whatever repo the box should follow. If you
+cannot push to `pkkann/rts-game`, point it at your fork instead: the deploy
+workflow triggers on `master` of the repo the runner is registered against,
+and `setup-actions.sh` reads that repo off `origin`, so a fork works end to end
+(`git remote set-url origin https://github.com/<you>/rts-game.git`).
+
 ## First install on a machine (once)
 
 ```
 ssh -t kaare@10.0.0.192
-git clone https://github.com/pkkann/rts-game.git ~/rts-game
+git clone https://github.com/<owner>/rts-game.git ~/rts-game
 cd ~/rts-game && bash scripts/setup-server.sh
 ```
 
